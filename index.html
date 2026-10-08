@@ -1,0 +1,1227 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>坂バカ3D - 999999mの果てへ</title>
+<style>
+  html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#0b1622;
+    font-family:"Hiragino Kaku Gothic ProN","Yu Gothic",system-ui,sans-serif;
+    user-select:none;-webkit-user-select:none;touch-action:none;}
+  canvas{display:block;position:fixed;inset:0;}
+  #ui{position:fixed;inset:0;pointer-events:none;z-index:10;}
+  #topbar{position:absolute;top:12px;left:16px;color:#fff;
+    text-shadow:2px 2px 0 #000,0 0 12px #000;font-size:14px;line-height:1.7;font-weight:700;}
+  #topbar b{font-size:26px;color:#ffe066;font-variant-numeric:tabular-nums;}
+  #topbar .sm{font-size:11px;opacity:.75;font-weight:400;}
+  #barwrap{position:absolute;top:14px;right:16px;width:230px;}
+  #bar{height:16px;border:2px solid #fff;background:rgba(0,0,0,.55);box-shadow:0 0 10px #000;}
+  #barfill{height:100%;width:0%;background:linear-gradient(90deg,#4ade80,#facc15,#ef4444);}
+  #pct{text-align:right;color:#fff;font-size:11px;margin-top:3px;
+    text-shadow:1px 1px 0 #000;font-variant-numeric:tabular-nums;}
+  #hint{position:absolute;bottom:18px;left:50%;transform:translateX(-50%);
+    color:#fff;font-size:13px;opacity:.8;text-shadow:2px 2px 0 #000;
+    animation:bl 1.2s infinite;white-space:nowrap;}
+  @keyframes bl{0%,100%{opacity:.25}50%{opacity:.95}}
+  #crashbox{position:fixed;left:50%;bottom:26px;transform:translateX(-50%) scale(.6);
+    display:none;flex-direction:column;align-items:center;gap:10px;
+    padding:16px 30px;background:rgba(0,0,0,.80);border:3px solid #ff3b3b;
+    border-radius:10px;z-index:20;opacity:0;
+    transition:transform .18s cubic-bezier(.2,2,.4,1),opacity .18s;
+    box-shadow:0 0 40px #ff000088;}
+  #crashbox.on{display:flex;opacity:1;transform:translateX(-50%) scale(1);}
+  #crashbox .big{color:#ff5252;font-size:30px;font-weight:900;letter-spacing:6px;text-shadow:3px 3px 0 #000;}
+  #crashbox .sub{color:#fff;font-size:12px;opacity:.85;}
+  #restart{pointer-events:auto;cursor:pointer;font-family:inherit;
+    font-size:20px;font-weight:900;letter-spacing:3px;
+    padding:12px 46px;border:3px solid #fff;border-radius:8px;
+    background:linear-gradient(#ff5f5f,#c1121f);color:#fff;
+    text-shadow:2px 2px 0 #000;box-shadow:0 6px 0 #6b0a12,0 0 24px #ff000066;
+    transition:transform .06s,box-shadow .06s;}
+  #restart:active{transform:translateY(5px);box-shadow:0 1px 0 #6b0a12;}
+  #restart:hover{filter:brightness(1.12);}
+  #loading{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+    background:#0b1622;color:#fff;z-index:99;font-size:15px;letter-spacing:2px;}
+</style>
+</head>
+<body>
+<div id="loading">LOADING…</div>
+
+<div id="ui">
+  <div id="topbar">
+    <div>深度 <b id="d1">0</b> m</div>
+    <div class="sm">残り <span id="d2">999999</span> m ／ 速度 <span id="sp">0</span> km/h</div>
+  </div>
+  <div id="barwrap">
+    <div id="bar"><div id="barfill"></div></div>
+    <div id="pct">0.000000 %</div>
+  </div>
+  <div id="hint">スペース／クリック：ジャンプ　　←→／AD：左右</div>
+</div>
+
+<div id="crashbox">
+  <div class="big">💥 大 破 💥</div>
+  <div class="sub">リスタートボタンを押すまで一生滑り続けます</div>
+  <button id="restart">リスタート</button>
+</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+
+/* ============================================================
+   定数・坂の基底（40°急斜面）
+============================================================ */
+const THETA = 40 * Math.PI / 180;
+const COS = Math.cos(THETA), SIN = Math.sin(THETA);
+
+const V_DOWN = new THREE.Vector3(0, -SIN, COS);
+const V_UP   = new THREE.Vector3(0,  COS, SIN);
+const V_SIDE = new THREE.Vector3(-1, 0, 0);
+
+const GRAV      = 22;
+const DT        = 1 / 120;
+const GOAL      = 999999;
+const SCALE     = 0.03;
+
+const ACCEL       = 8.5;
+const JUMPV       = 11.0;
+const LAT_ACC     = 30;
+const LAT_MAX     = 14;
+const LAT_RANGE   = 12;       // トラック半幅（プレイヤーの可動限界）
+const WALL_LAT    = 13.5;     // 壁の位置
+const WALL_H      = 24;
+const LAT_FRICTION = 0.004;
+
+/* ★ 無限加速 */
+const SPEED_BASE  = 62;
+const SPEED_GAIN  = 0.0006;
+const SPEED_MAX   = 1e12;
+function speedCap(dist){
+  return Math.min(SPEED_MAX, SPEED_BASE * (1 + dist * SPEED_GAIN));
+}
+
+const MAX_BOTS    = 3;
+const BOT_RADIUS  = 1.6;
+
+function slopeToWorld(s, h, lat, out){
+  out = out || new THREE.Vector3();
+  return out.set(-lat, -SIN*s + COS*h, COS*s + SIN*h);
+}
+
+const slopeMat  = new THREE.Matrix4().makeBasis(V_SIDE, V_UP, V_DOWN);
+const slopeQuat = new THREE.Quaternion().setFromRotationMatrix(slopeMat);
+
+/* ============================================================
+   レンダラ・シーン
+============================================================ */
+const renderer = new THREE.WebGLRenderer({ antialias:true, powerPreference:'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+renderer.domElement.id = 'game';
+
+const FOG_COLOR = new THREE.Color(0xb8d8f0);
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(FOG_COLOR, 140, 880);
+
+(function(){
+  const c = document.createElement('canvas');
+  c.width = 8; c.height = 256;
+  const g = c.getContext('2d');
+  const grad = g.createLinearGradient(0,0,0,256);
+  grad.addColorStop(0.00,'#17457e');
+  grad.addColorStop(0.30,'#3d7cbe');
+  grad.addColorStop(0.55,'#8fc0e6');
+  grad.addColorStop(0.78,'#b8d8f0');
+  grad.addColorStop(1.00,'#b8d8f0');
+  g.fillStyle = grad; g.fillRect(0,0,8,256);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  scene.background = t;
+})();
+
+const camera = new THREE.PerspectiveCamera(80, innerWidth/innerHeight, 0.1, 2200);
+
+scene.add(new THREE.HemisphereLight(0xd6ecff, 0x4a3d30, 1.15));
+const sun = new THREE.DirectionalLight(0xfff2dd, 1.55);
+sun.position.set(0.45, 1.0, -0.25).normalize().multiplyScalar(120);
+scene.add(sun);
+
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ============================================================
+   地面
+============================================================ */
+const GROUND_W = 420, GROUND_L = 3200;
+const groundUni = {
+  uLen:{value:GROUND_L}, uWid:{value:GROUND_W},
+  uFogColor:{value:FOG_COLOR}, uFogNear:{value:140}, uFogFar:{value:880},
+  uOffsetS:{value:0},
+};
+
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(GROUND_W, GROUND_L, 1, 1),
+  new THREE.ShaderMaterial({
+    uniforms: groundUni,
+    vertexShader:`
+      varying vec2 vUv; varying float vDist;
+      void main(){
+        vUv = uv;
+        vec4 mv = modelViewMatrix * vec4(position,1.0);
+        vDist = -mv.z;
+        gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader:`
+      uniform float uLen, uWid, uFogNear, uFogFar, uOffsetS;
+      uniform vec3 uFogColor;
+      varying vec2 vUv; varying float vDist;
+      void main(){
+        float sRel = (0.5 - vUv.y) * uLen + uOffsetS;
+        float lat  = (vUv.x - 0.5) * uWid;
+        float fS = fract(sRel/10.0);
+        float minor = step(fS,0.035) + step(0.965,fS);
+        float fL = fract(lat/5.0);
+        float lane = step(fL,0.07) + step(0.93,fL);
+        float fM = fract(sRel/100.0);
+        float major = step(fM,0.010) + step(0.990,fM);
+        float fC = fract(lat/40.0);
+        float center = step(fC,0.010) + step(0.990,fC);
+        vec3 col = vec3(0.145,0.125,0.105);
+        col = mix(col, vec3(0.235,0.205,0.170), minor*0.6);
+        col = mix(col, vec3(0.200,0.180,0.150), lane*0.45);
+        col = mix(col, vec3(0.900,0.820,0.560), major*0.95);
+        col = mix(col, vec3(0.950,0.870,0.620), center*0.7);
+        float fogF = smoothstep(uFogNear, uFogFar, vDist);
+        col = mix(col, uFogColor, fogF);
+        gl_FragColor = vec4(col, 1.0);
+      }`,
+  })
+);
+ground.quaternion.setFromUnitVectors(new THREE.Vector3(0,0,1), V_UP);
+ground.frustumCulled = false;
+scene.add(ground);
+
+/* ============================================================
+   壁
+============================================================ */
+const wallUni = {
+  uLen:{value:GROUND_L}, uH:{value:WALL_H},
+  uOffsetS:{value:0},
+  uFogColor:{value:FOG_COLOR},
+  uFogNear:{value:140}, uFogFar:{value:880},
+};
+
+const wallBasis = new THREE.Matrix4().makeBasis(
+  V_DOWN, V_UP, new THREE.Vector3(-1,0,0)
+);
+const wallQuat = new THREE.Quaternion().setFromRotationMatrix(wallBasis);
+
+const wallGeo = new THREE.PlaneGeometry(GROUND_L, WALL_H);
+const wallMat = new THREE.ShaderMaterial({
+  uniforms: wallUni,
+  side: THREE.DoubleSide,
+  vertexShader:`
+    varying vec2 vUv;
+    varying float vDist;
+    void main(){
+      vUv = uv;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      vDist = -mv.z;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader:`
+    uniform float uLen, uH, uOffsetS, uFogNear, uFogFar;
+    uniform vec3 uFogColor;
+    varying vec2 vUv;
+    varying float vDist;
+    void main(){
+      float s = vUv.x * uLen + uOffsetS;
+      float h = vUv.y * uH;
+      float diag = fract((s + h * 5.0) / 10.0);
+      float stripe = step(0.5, diag);
+      vec3 red   = vec3(0.88, 0.16, 0.16);
+      vec3 white = vec3(0.96, 0.94, 0.88);
+      vec3 col   = mix(red, white, stripe);
+      float vline = step(fract(s / 30.0), 0.025);
+      col = mix(col, vec3(0.18, 0.10, 0.08), vline * 0.9);
+      float botDark = smoothstep(2.5, 0.0, h);
+      col = mix(col, vec3(0.08, 0.04, 0.04), botDark * 0.7);
+      float topGlow = smoothstep(uH - 2.5, uH - 0.3, h);
+      col = mix(col, vec3(1.0, 0.85, 0.18), topGlow * 0.95);
+      float topCap = step(uH - 0.35, h);
+      col = mix(col, vec3(0.12, 0.08, 0.04), topCap);
+      float fogF = smoothstep(uFogNear, uFogFar, vDist);
+      col = mix(col, uFogColor, fogF);
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `,
+});
+
+const wallL = new THREE.Mesh(wallGeo, wallMat);
+const wallR = new THREE.Mesh(wallGeo, wallMat);
+wallL.quaternion.copy(wallQuat);
+wallR.quaternion.copy(wallQuat);
+wallL.frustumCulled = false;
+wallR.frustumCulled = false;
+scene.add(wallL, wallR);
+
+/* ============================================================
+   骨格定義
+============================================================ */
+const BODY = {
+  rearW : [ -26, 13,  0, 13 ],
+  frontW: [  26, 13,  0, 13 ],
+  frame : [   0, 21,  0,  6 ],
+  seat  : [ -13, 37,  0,  6 ],
+  bar   : [  21, 47,  0,  6 ],
+  hip   : [ -10, 43,  0,  9 ],
+  chest : [  -1, 61,  0, 10 ],
+  head  : [   3, 76,  0, 11 ],
+  elbowF: [  11, 59,  9,  5 ],
+  handF : [  21, 49, 12,  5 ],
+  elbowB: [ -17, 57, -9,  5 ],
+  handB : [ -23, 51,-12,  5 ],
+  kneeF : [   3, 33,  7,  7 ],
+  footF : [   1, 23,  9,  6 ],
+  kneeB : [  -7, 33, -7,  7 ],
+  footB : [  -3, 23, -9,  6 ],
+};
+
+const BONES = [
+  ['rearW','frontW', 1.0, 0.00, 'frame',  0.075],
+  ['rearW','frame' , 1.0, 0.00, 'frame',  0.070],
+  ['frame','frontW', 1.0, 0.00, 'frame',  0.070],
+  ['frame','seat'  , 1.0, 0.00, 'frame2', 0.085],
+  ['seat' ,'rearW' , 1.0, 0.00, 'frame',  0.070],
+  ['frame','bar'   , 1.0, 0.00, 'frame2', 0.085],
+  ['bar'  ,'frontW', 1.0, 0.00, 'frame',  0.070],
+  ['seat' ,'hip'   , 0.55,0.10, 'pants',  0.100],
+  ['hip'  ,'chest' , 1.0, 0.06, 'limbF',  0.145],
+  ['chest','head'  , 1.0, 0.06, 'skin',   0.085],
+  ['chest','elbowF', 1.0, 0.20, 'limbF',  0.090],
+  ['elbowF','handF', 1.0, 0.24, 'skin',   0.065],
+  ['chest','elbowB', 1.0, 0.20, 'limbB',  0.090],
+  ['elbowB','handB', 1.0, 0.24, 'skin',   0.065],
+  ['hip'  ,'kneeF' , 1.0, 0.20, 'pants',  0.100],
+  ['kneeF','footF' , 1.0, 0.24, 'pants',  0.080],
+  ['hip'  ,'kneeB' , 1.0, 0.20, 'pants',  0.100],
+  ['kneeB','footB' , 1.0, 0.24, 'pants',  0.080],
+  ['handF','bar'   , 0.45,0.10, 'frame2', 0.045],
+  ['footF','frame' , 0.45,0.10, 'frame',  0.045],
+  ['footB','frame' , 0.45,0.10, 'frame',  0.045],
+];
+
+const JOINT_MAT_NAME = {
+  rearW:'tyre', frontW:'tyre', frame:'frame', seat:'frame2', bar:'frame2',
+  hip:'pants', chest:'limbF', head:'helmet',
+  elbowF:'limbF', handF:'skin', elbowB:'limbB', handB:'skin',
+  kneeF:'pants', footF:'pants', kneeB:'pants', footB:'pants',
+};
+
+/* ============================================================
+   マテリアル
+============================================================ */
+const M = {
+  frame  : new THREE.MeshLambertMaterial({ color:0xe63946 }),
+  frame2 : new THREE.MeshLambertMaterial({ color:0xb5121c }),
+  skin   : new THREE.MeshLambertMaterial({ color:0xf4a261 }),
+  limbF  : new THREE.MeshLambertMaterial({ color:0x2a9d8f }),
+  limbB  : new THREE.MeshLambertMaterial({ color:0x1f7268 }),
+  pants  : new THREE.MeshLambertMaterial({ color:0x264653 }),
+  helmet : new THREE.MeshLambertMaterial({ color:0xff3b3b }),
+  tyre   : new THREE.MeshLambertMaterial({ color:0x1a1a1a }),
+  dark   : new THREE.MeshLambertMaterial({ color:0x333333 }),
+  orange : new THREE.MeshLambertMaterial({ color:0xff7a00 }),
+  white  : new THREE.MeshLambertMaterial({ color:0xffffff }),
+  rock   : new THREE.MeshLambertMaterial({ color:0x8d99ae }),
+  metal  : new THREE.MeshLambertMaterial({ color:0x4a4e69 }),
+  red    : new THREE.MeshLambertMaterial({ color:0xe63946 }),
+  green  : new THREE.MeshLambertMaterial({ color:0x2d6a4f }),
+};
+
+const GEO = {
+  sphere: new THREE.SphereGeometry(1, 12, 9),
+  torus : new THREE.TorusGeometry(0.30, 0.055, 8, 18),
+  hub   : new THREE.CylinderGeometry(0.05, 0.05, 0.09, 8),
+  visor : new THREE.BoxGeometry(0.30, 0.05, 0.16),
+  cyl   : (() => {
+    const g = new THREE.CylinderGeometry(1, 1, 1, 8, 1, false);
+    g.translate(0, 0.5, 0);
+    return g;
+  })(),
+};
+
+/* ============================================================
+   リグ生成
+============================================================ */
+function buildRig(){
+  const root = new THREE.Group();
+  const joints = {};
+  for (const k in BODY){
+    const r = Math.max(0.05, BODY[k][3] * SCALE * 0.78);
+    let mesh;
+    if (k === 'rearW' || k === 'frontW'){
+      mesh = new THREE.Group();
+      const t = new THREE.Mesh(GEO.torus, M.tyre);
+      t.quaternion.setFromAxisAngle(new THREE.Vector3(0,1,0), Math.PI/2);
+      mesh.add(t);
+      const h = new THREE.Mesh(GEO.hub, M.frame2);
+      h.rotation.z = Math.PI/2;
+      mesh.add(h);
+    } else {
+      mesh = new THREE.Mesh(GEO.sphere, M[JOINT_MAT_NAME[k]] || M.skin);
+      mesh.scale.setScalar(r);
+    }
+    joints[k] = mesh;
+    root.add(mesh);
+  }
+  const visor = new THREE.Mesh(GEO.visor, M.helmet);
+  root.add(visor);
+  const bones = BONES.map(b => {
+    const m = new THREE.Mesh(GEO.cyl, M[b[4]]);
+    m.userData.radius = b[5];
+    root.add(m);
+    return m;
+  });
+  scene.add(root);
+  return { root, joints, visor, bones };
+}
+
+const playerRig = buildRig();
+
+/* ============================================================
+   障害物
+============================================================ */
+function stripeTexture(c1, c2){
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const x = c.getContext('2d');
+  x.fillStyle = c1; x.fillRect(0,0,128,128);
+  x.fillStyle = c2;
+  x.save(); x.translate(64,64); x.rotate(-Math.PI/4); x.translate(-140,-140);
+  for (let i=0;i<12;i++) x.fillRect(i*32, 0, 16, 300);
+  x.restore();
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.repeat.set(3,1);
+  return t;
+}
+M.stripe = new THREE.MeshLambertMaterial({ map: stripeTexture('#ffd23f','#1a1a1a') });
+
+const OBSTACLE_DEFS = [
+  { name:'cone', w:0.45, h:1.25, build(){
+      const g = new THREE.Group();
+      const base = new THREE.Mesh(new THREE.BoxGeometry(0.9,0.08,0.9), M.dark);
+      base.position.y = 0.04; g.add(base);
+      const cone = new THREE.Mesh(new THREE.ConeGeometry(0.36,1.10,14), M.orange);
+      cone.position.y = 0.63; g.add(cone);
+      const band = new THREE.Mesh(new THREE.CylinderGeometry(0.24,0.26,0.14,14), M.white);
+      band.position.y = 0.50; g.add(band);
+      return g;
+  }},
+  { name:'rock', w:0.72, h:1.15, build(){
+      const geo = new THREE.IcosahedronGeometry(0.62, 0);
+      const p = geo.attributes.position;
+      for (let i=0;i<p.count;i++){
+        p.setXYZ(i,
+          p.getX(i)*(0.75+Math.random()*0.5),
+          p.getY(i)*(0.60+Math.random()*0.5),
+          p.getZ(i)*(0.75+Math.random()*0.5));
+      }
+      geo.computeVertexNormals();
+      const m = new THREE.Mesh(geo, M.rock);
+      m.position.y = 0.52;
+      m.rotation.set(Math.random()*3, Math.random()*3, Math.random()*3);
+      return m;
+  }},
+  { name:'barrier', w:1.25, h:1.25, build(){
+      const g = new THREE.Group();
+      const board = new THREE.Mesh(new THREE.BoxGeometry(2.5,0.55,0.10), M.stripe);
+      board.position.y = 0.95; g.add(board);
+      for (const x of [-0.95, 0.95]){
+        const leg = new THREE.Mesh(new THREE.BoxGeometry(0.10,1.25,0.10), M.dark);
+        leg.position.set(x, 0.62, 0); g.add(leg);
+      }
+      const foot = new THREE.Mesh(new THREE.BoxGeometry(2.6,0.08,0.55), M.dark);
+      foot.position.y = 0.04; g.add(foot);
+      return g;
+  }},
+  { name:'drum', w:0.42, h:1.05, build(){
+      const g = new THREE.Group();
+      const b = new THREE.Mesh(new THREE.CylinderGeometry(0.35,0.35,1.0,16), M.red);
+      b.position.y = 0.5; g.add(b);
+      for (const y of [0.30,0.70]){
+        const r = new THREE.Mesh(new THREE.CylinderGeometry(0.375,0.375,0.10,16), M.white);
+        r.position.y = y; g.add(r);
+      }
+      return g;
+  }},
+  { name:'anvil', w:0.62, h:1.05, build(){
+      const g = new THREE.Group();
+      const b = new THREE.Mesh(new THREE.BoxGeometry(1.00,0.35,0.55), M.metal);
+      b.position.y = 0.25; g.add(b);
+      const t = new THREE.Mesh(new THREE.BoxGeometry(1.35,0.22,0.50), M.metal);
+      t.position.y = 0.55; g.add(t);
+      const h = new THREE.Mesh(new THREE.BoxGeometry(0.70,0.28,0.45), M.metal);
+      h.position.y = 0.80; g.add(h);
+      const base = new THREE.Mesh(new THREE.BoxGeometry(1.10,0.10,0.62), M.dark);
+      base.position.y = 0.05; g.add(base);
+      return g;
+  }},
+  { name:'cactus', w:0.55, h:1.95, build(){
+      const g = new THREE.Group();
+      const trunk = new THREE.Mesh(new THREE.CapsuleGeometry(0.22,1.25,4,10), M.green);
+      trunk.position.y = 0.88; g.add(trunk);
+      const a1 = new THREE.Mesh(new THREE.CapsuleGeometry(0.15,0.50,4,8), M.green);
+      a1.position.set(-0.38,1.10,0); a1.rotation.z = 0.65; g.add(a1);
+      const a2 = new THREE.Mesh(new THREE.CapsuleGeometry(0.15,0.40,4,8), M.green);
+      a2.position.set(0.38,1.25,0); a2.rotation.z = -0.65; g.add(a2);
+      return g;
+  }},
+];
+
+const OBSTACLE_PROTO = OBSTACLE_DEFS.map(d => d.build());
+
+/* ============================================================
+   状態
+============================================================ */
+const S = {
+  mode:'ride', t:0,
+  s:0, h:0, lat:0,
+  vs:150/3.6, vh:0, vlat:0,
+  grounded:true, dist:0,
+  obstacles:[], nextObs:900,
+  ragdoll:null, shake:0, won:false,
+};
+
+const origin       = new THREE.Vector3();
+const originTarget = new THREE.Vector3();
+
+/* ============================================================
+   ラグドール共通
+============================================================ */
+const _tmpA = new THREE.Vector3();
+
+function createRagdoll(parts, baseVel){
+  const keysArr = Object.keys(parts);
+  const c = new THREE.Vector3();
+  for (const k of keysArr) c.add(parts[k].pos);
+  c.multiplyScalar(1 / keysArr.length);
+
+  const omega = new THREE.Vector3(
+    (Math.random()-0.5) * 12,
+    (Math.random()-0.5) * 12,
+    (Math.random()-0.5) * 12
+  );
+  const r = new THREE.Vector3(), v = new THREE.Vector3();
+  for (const k of keysArr){
+    const p = parts[k];
+    r.subVectors(p.pos, c);
+    v.copy(baseVel).add(new THREE.Vector3().crossVectors(omega, r));
+    v.x += (Math.random()-0.5) * 9;
+    v.y += (Math.random()-0.5) * 9;
+    v.z += (Math.random()-0.5) * 9;
+    p.prev.copy(p.pos).addScaledVector(v, -DT);
+  }
+  const cons = [];
+  for (const [a, b, stiff, amp] of BONES){
+    const A = parts[a], B = parts[b];
+    cons.push({
+      a:A, b:B,
+      len: A.pos.distanceTo(B.pos),
+      stiff, amp,
+      freq : 4 + Math.random() * 28,
+      phase: Math.random() * Math.PI * 2,
+    });
+  }
+  return { parts, cons, keys: keysArr };
+}
+
+function solveCon(c, t){
+  const a = c.a.pos, b = c.b.pos;
+  let dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+  let d = Math.sqrt(dx*dx + dy*dy + dz*dz);
+  if (d < 1e-5) d = 1e-5;
+  const rest = c.len * (1 + c.amp * Math.sin(t * c.freq + c.phase));
+  const diff = ((d - rest) / d) * c.stiff * 0.5;
+  const ox = dx*diff, oy = dy*diff, oz = dz*diff;
+  a.x += ox; a.y += oy; a.z += oz;
+  b.x -= ox; b.y -= oy; b.z -= oz;
+}
+
+const _pv   = new THREE.Vector3();
+const _vtan = new THREE.Vector3();
+
+function groundCollide(p){
+  const hgt = p.pos.dot(V_UP);
+  if (hgt >= p.r) return;
+  _pv.subVectors(p.pos, p.prev);
+  const vn = _pv.dot(V_UP);
+  if (vn < 0) _pv.addScaledVector(V_UP, -vn * 1.22);
+  _vtan.copy(_pv).addScaledVector(V_UP, -_pv.dot(V_UP));
+  _pv.addScaledVector(_vtan, -LAT_FRICTION);
+  p.pos.addScaledVector(V_UP, p.r - hgt);
+  p.prev.copy(p.pos).sub(_pv);
+}
+
+function stepRagdoll(ragdoll, dt, t){
+  const g = GRAV * dt * dt;
+  const damp = 0.9995;
+  for (const k of ragdoll.keys){
+    const p = ragdoll.parts[k];
+    const vx = (p.pos.x - p.prev.x) * damp;
+    const vy = (p.pos.y - p.prev.y) * damp;
+    const vz = (p.pos.z - p.prev.z) * damp;
+    p.prev.copy(p.pos);
+    p.pos.x += vx;
+    p.pos.y += vy - g;
+    p.pos.z += vz;
+  }
+  for (let it = 0; it < 7; it++){
+    for (const c of ragdoll.cons) solveCon(c, t);
+  }
+  for (const k of ragdoll.keys) groundCollide(ragdoll.parts[k]);
+}
+
+/* ============================================================
+   プレイヤー座標
+============================================================ */
+function ridePartWorld(name, out){
+  const b = BODY[name];
+  out.set(b[2]*SCALE, b[1]*SCALE, b[0]*SCALE);
+  out.applyQuaternion(slopeQuat);
+  slopeToWorld(S.s, S.h, S.lat, _tmpA);
+  out.add(_tmpA);
+  return out;
+}
+function playerGetWorld(name, out){
+  if (S.mode === 'ride') return ridePartWorld(name, out);
+  const p = S.ragdoll && S.ragdoll.parts[name];
+  if (!p) return out.set(0,0,0);
+  return out.copy(p.pos);
+}
+
+/* ============================================================
+   BOT
+============================================================ */
+const bots = [];
+let botSpawnTimer = 3.0;
+
+function botPartWorld(bot, name, out){
+  const b = BODY[name];
+  out.set(b[2]*SCALE, b[1]*SCALE, b[0]*SCALE);
+  out.applyQuaternion(slopeQuat);
+  slopeToWorld(bot.s, bot.h, bot.lat, _tmpA);
+  out.add(_tmpA);
+  return out;
+}
+
+function makeRagdollParts(bot){
+  const parts = {};
+  for (const k in BODY){
+    const pos = new THREE.Vector3();
+    botPartWorld(bot, k, pos);
+    parts[k] = {
+      pos, prev: pos.clone(),
+      r: Math.max(0.10, BODY[k][3] * SCALE * 0.95),
+    };
+  }
+  return parts;
+}
+
+function spawnBot(){
+  const refS = Math.max(S.s, S.dist);
+  const s   = refS + 3 + Math.random() * 90;
+  const prefLat = (Math.random() * 2 - 1) * (LAT_RANGE - 2);
+  const lat = prefLat + (Math.random() - 0.5) * 2;
+
+  const bot = {
+    s, h:0, lat,
+    vs: S.vs, vh:0, vlat:0,
+    grounded: true,
+    state: 'ride',
+    ragdoll: null,
+    ragdollTimer: 0,
+    speedBias: 1 + (Math.random() * 2 - 1) * 0.02,
+    prefLat,
+    rig: buildRig(),
+  };
+  bots.push(bot);
+}
+
+function removeBot(bot){
+  scene.remove(bot.rig.root);
+  const i = bots.indexOf(bot);
+  if (i >= 0) bots.splice(i, 1);
+}
+function countRidingBots(){
+  let n = 0;
+  for (const b of bots) if (b.state === 'ride') n++;
+  return n;
+}
+
+function botAI(bot, dt){
+  const lookAhead = 10 + bot.vs * 0.55;
+
+  let threat = null, threatDist = Infinity;
+  for (const o of S.obstacles){
+    const ds = o.s - bot.s;
+    if (ds < 0 || ds > lookAhead) continue;
+    if (Math.abs(o.lat - bot.lat) > o.w * 0.5 + 1.2) continue;
+    if (threatDist > ds){ threatDist = ds; threat = o; }
+  }
+
+  let targetLat;
+  if (threat){
+    const needR = threat.lat + threat.w * 0.5 + 1.6;
+    const needL = threat.lat - threat.w * 0.5 - 1.6;
+    const canR = needR <  LAT_RANGE - 0.4;
+    const canL = needL > -LAT_RANGE + 0.4;
+    if (canR && canL){
+      targetLat = Math.abs(needR - bot.lat) < Math.abs(needL - bot.lat)
+                  ? needR : needL;
+    } else if (canR) targetLat = needR;
+    else if (canL) targetLat = needL;
+    else             targetLat = bot.lat;
+  } else {
+    targetLat = bot.prefLat;
+    const playerDist = bot.s - S.s;
+    if (playerDist > 0 && playerDist < 25){
+      const bias = 1 - (playerDist / 25);
+      targetLat = targetLat * (1 - bias * 0.5) + S.lat * (bias * 0.5);
+    }
+  }
+
+  const dv = (targetLat - bot.lat) * 6;
+  bot.vlat = Math.max(-LAT_MAX, Math.min(LAT_MAX, dv));
+}
+
+function stepBotRide(bot, dt){
+  bot.vs = S.vs * bot.speedBias;
+  botAI(bot, dt);
+
+  bot.h = 0; bot.vh = 0; bot.grounded = true;
+  const oldS = bot.s;
+  bot.s += bot.vs * dt;
+  bot.lat += bot.vlat * dt;
+
+  if (bot.lat >  LAT_RANGE){ bot.lat =  LAT_RANGE; bot.vlat = 0; }
+  if (bot.lat < -LAT_RANGE){ bot.lat = -LAT_RANGE; bot.vlat = 0; }
+
+  for (const o of S.obstacles){
+    const oMin = o.s - 1.15 - o.w * 0.5;
+    const oMax = o.s + 1.15 + o.w * 0.5;
+    if (bot.s < oMin) break;
+    if (oldS > oMax) continue;
+    if (Math.abs(bot.lat - o.lat) < 0.42 + o.w * 0.5){
+      botCrash(bot);
+      return;
+    }
+  }
+}
+
+function botCrash(bot){
+  bot.state = 'ragdoll';
+  bot.ragdollTimer = 0;
+  const parts = makeRagdollParts(bot);
+  const baseVel = new THREE.Vector3()
+    .addScaledVector(V_DOWN, bot.vs)
+    .addScaledVector(V_SIDE, bot.vlat);
+  bot.ragdoll = createRagdoll(parts, baseVel);
+}
+
+function stepBotRagdoll(bot, dt){
+  bot.ragdollTimer += dt;
+  if (bot.ragdoll) stepRagdoll(bot.ragdoll, dt, S.t);
+  if (bot.ragdollTimer > 5) removeBot(bot);
+}
+
+function updateBotSpawning(dt){
+  const riding = countRidingBots();
+  if (riding < MAX_BOTS){
+    botSpawnTimer -= dt;
+    if (botSpawnTimer <= 0){
+      spawnBot();
+      botSpawnTimer = 3 + Math.random() * 6;
+    }
+  } else {
+    botSpawnTimer = 3 + Math.random() * 6;
+  }
+}
+
+/* ============================================================
+   ライダー同士の物理干渉
+============================================================ */
+function separateRiders(){
+  for (const b of bots){
+    if (b.state !== 'ride') continue;
+    const ds = S.s - b.s;
+    const dl = S.lat - b.lat;
+    const dist = Math.hypot(ds, dl);
+    if (dist < BOT_RADIUS && dist > 0.01){
+      const ny = dl / dist;
+      const push = (BOT_RADIUS - dist);
+      S.lat += ny * push * 0.15;
+      S.vlat += ny * 1.5;
+      b.lat -= ny * push * 0.85;
+      b.vlat -= ny * 6;
+      if (b.lat >  LAT_RANGE) b.lat =  LAT_RANGE;
+      if (b.lat < -LAT_RANGE) b.lat = -LAT_RANGE;
+    }
+  }
+  for (let i = 0; i < bots.length; i++){
+    for (let j = i+1; j < bots.length; j++){
+      const A = bots[i], B = bots[j];
+      if (A.state !== 'ride' || B.state !== 'ride') continue;
+      const ds = A.s - B.s;
+      const dl = A.lat - B.lat;
+      const dist = Math.hypot(ds, dl);
+      if (dist < BOT_RADIUS && dist > 0.01){
+        const ny = dl / dist;
+        const push = (BOT_RADIUS - dist) * 0.5;
+        A.lat += ny * push;  B.lat -= ny * push;
+        A.vlat += ny * 4;    B.vlat -= ny * 4;
+        if (A.lat >  LAT_RANGE) A.lat =  LAT_RANGE;
+        if (A.lat < -LAT_RANGE) A.lat = -LAT_RANGE;
+        if (B.lat >  LAT_RANGE) B.lat =  LAT_RANGE;
+        if (B.lat < -LAT_RANGE) B.lat = -LAT_RANGE;
+      }
+    }
+  }
+}
+
+function stepBots(dt){
+  for (let i = bots.length - 1; i >= 0; i--){
+    const b = bots[i];
+    if (b.state === 'ride') stepBotRide(b, dt);
+    else stepBotRagdoll(b, dt);
+    const farLimit = Math.max(350, S.vs * 0.5);
+    if (Math.abs(b.s - S.s) > farLimit && b.state === 'ride') removeBot(b);
+  }
+}
+
+/* ============================================================
+   入力
+============================================================ */
+const keys = { left:false, right:false };
+function doJump(){
+  if (S.mode !== 'ride' || !S.grounded) return;
+  S.vh = JUMPV; S.grounded = false;
+}
+window.addEventListener('keydown', e => {
+  if (e.code === 'ArrowLeft'  || e.code === 'KeyA'){ keys.left  = true; e.preventDefault(); }
+  if (e.code === 'ArrowRight' || e.code === 'KeyD'){ keys.right = true; e.preventDefault(); }
+  if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW'){ e.preventDefault(); doJump(); }
+  if (e.code === 'KeyR'){ e.preventDefault(); reset(); }
+});
+window.addEventListener('keyup', e => {
+  if (e.code === 'ArrowLeft'  || e.code === 'KeyA') keys.left  = false;
+  if (e.code === 'ArrowRight' || e.code === 'KeyD') keys.right = false;
+});
+window.addEventListener('pointerdown', e => {
+  if (e.target && e.target.id === 'restart') return;
+  doJump();
+});
+document.getElementById('restart').addEventListener('click', e => {
+  e.stopPropagation(); reset();
+});
+
+/* ============================================================
+   リセット
+============================================================ */
+function reset(){
+  for (const o of S.obstacles) scene.remove(o.mesh);
+  S.obstacles.length = 0;
+  while (bots.length) removeBot(bots[0]);
+
+  S.mode = 'ride';
+  S.t = 0;
+  S.s = 0; S.h = 0; S.lat = 0;
+  S.vs = 150/3.6; S.vh = 0; S.vlat = 0;
+  S.grounded = true;
+  S.dist = 0;
+  S.nextObs = 900;
+  S.ragdoll = null;
+  S.shake = 0;
+  S.won = false;
+  botSpawnTimer = 3.0;
+
+  document.getElementById('crashbox').classList.remove('on');
+  document.getElementById('hint').style.display = '';
+
+  slopeToWorld(S.s, S.h, S.lat, origin);
+  origin.addScaledVector(V_UP, 0.9);
+}
+
+/* ============================================================
+   ★ 障害物生成
+   生成範囲を道より広げる（LAT_RANGE + 1.2 = 壁の内側ギリギリ）
+   → 端に逃げても必ず障害物が出現し、安全地帯を強制撤去
+============================================================ */
+function spawnObstacle(s){
+  const idx = (Math.random() * OBSTACLE_DEFS.length) | 0;
+  const def = OBSTACLE_DEFS[idx];
+  const mesh = OBSTACLE_PROTO[idx].clone();
+  const sc = 0.85 + Math.random() * 0.45;
+  mesh.scale.setScalar(sc);
+
+  // ★ ここが核心：道幅 LAT_RANGE=12 を超え、壁(WALL_LAT=13.5)の
+  //   内側 13.2 まで生成。これで両端の「安全地帯」が消える。
+  const latMax = LAT_RANGE + 1.2;         // = 13.2
+  const lat = (Math.random() * 2 - 1) * latMax;
+
+  const pos = slopeToWorld(s, 0, lat, new THREE.Vector3());
+
+  const q = slopeQuat.clone().multiply(
+    new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0), (Math.random()-0.5)*0.8)
+  );
+  mesh.quaternion.copy(q);
+  scene.add(mesh);
+  S.obstacles.push({ s, lat, w: def.w*sc, h: def.h*sc, pos, mesh });
+}
+
+/* ============================================================
+   走行ステップ（プレイヤー）
+============================================================ */
+function stepRide(dt){
+  S.vs += ACCEL * dt;
+  const cap = speedCap(S.dist);
+  if (S.vs > cap) S.vs = cap;
+
+  if (keys.left)       S.vlat = Math.max(S.vlat - LAT_ACC*dt, -LAT_MAX);
+  else if (keys.right) S.vlat = Math.min(S.vlat + LAT_ACC*dt,  LAT_MAX);
+  else                 S.vlat *= Math.pow(0.004, dt);
+
+  S.lat += S.vlat * dt;
+  if (S.lat >  LAT_RANGE){ S.lat =  LAT_RANGE; S.vlat = 0; }
+  if (S.lat < -LAT_RANGE){ S.lat = -LAT_RANGE; S.vlat = 0; }
+
+  if (!S.grounded) S.vh -= GRAV * COS * dt;
+  S.h += S.vh * dt;
+  if (S.h <= 0){
+    S.h = 0;
+    if (S.vh < 0) S.vh = 0;
+    S.grounded = true;
+  }
+
+  const oldS = S.s;
+  S.s += S.vs * dt;
+  if (S.s > S.dist) S.dist = S.s;
+  if (S.dist >= GOAL && !S.won) S.won = true;
+
+  const horizon = Math.max(3200, S.vs * 2.0);
+  while (S.nextObs < S.s + horizon){
+    spawnObstacle(S.nextObs);
+    S.nextObs += 24 + Math.random() * 58;
+  }
+  const keepBehind = Math.max(400, S.vs * 0.5);
+  while (S.obstacles.length && S.obstacles[0].s < S.s - keepBehind){
+    scene.remove(S.obstacles[0].mesh);
+    S.obstacles.shift();
+  }
+
+  // 掃引衝突
+  const halfLen = 1.15, halfWid = 0.42;
+  for (const o of S.obstacles){
+    const oMin = o.s - halfLen - o.w * 0.5;
+    const oMax = o.s + halfLen + o.w * 0.5;
+    if (S.s < oMin) break;
+    if (oldS > oMax) continue;
+    if (Math.abs(S.lat - o.lat) < halfWid + o.w * 0.5 && S.h < o.h){
+      startCrash();
+      return;
+    }
+  }
+}
+
+/* ============================================================
+   プレイヤー衝突
+============================================================ */
+function startCrash(){
+  S.mode = 'crash';
+  S.shake = 1.0;
+  document.getElementById('crashbox').classList.add('on');
+  document.getElementById('hint').style.display = 'none';
+
+  const parts = {};
+  for (const k in BODY){
+    const pos = new THREE.Vector3();
+    ridePartWorld(k, pos);
+    parts[k] = {
+      pos, prev: pos.clone(),
+      r: Math.max(0.10, BODY[k][3] * SCALE * 0.95),
+    };
+  }
+  const baseVel = new THREE.Vector3()
+    .addScaledVector(V_DOWN, S.vs)
+    .addScaledVector(V_UP, S.vh)
+    .addScaledVector(V_SIDE, S.vlat);
+  S.ragdoll = createRagdoll(parts, baseVel);
+}
+
+function stepCrash(dt){
+  const R = S.ragdoll;
+  if (!R) return;
+  stepRagdoll(R, dt, S.t);
+  let cx=0, cy=0, cz=0;
+  for (const k of R.keys){
+    const p = R.parts[k].pos;
+    cx += p.x; cy += p.y; cz += p.z;
+  }
+  const n = R.keys.length;
+  _tmpA.set(cx/n, cy/n, cz/n);
+  const d = _tmpA.dot(V_DOWN);
+  if (d > S.dist) S.dist = d;
+}
+
+/* ============================================================
+   物理まとめ
+============================================================ */
+function physics(dt){
+  S.t += dt;
+  if (S.mode === 'ride') stepRide(dt);
+  else                   stepCrash(dt);
+  stepBots(dt);
+  separateRiders();
+  updateBotSpawning(dt);
+
+  if (S.shake > 0){
+    S.shake *= Math.pow(0.002, dt);
+    if (S.shake < 0.002) S.shake = 0;
+  }
+}
+
+/* ============================================================
+   原点・カメラ
+============================================================ */
+function updateOrigin(dt){
+  if (S.mode === 'ride'){
+    slopeToWorld(S.s, S.h, S.lat, originTarget);
+    originTarget.addScaledVector(V_UP, 0.85);
+    origin.copy(originTarget);
+  } else {
+    const R = S.ragdoll;
+    if (!R) return;
+    originTarget.set(0,0,0);
+    for (const k of R.keys) originTarget.add(R.parts[k].pos);
+    originTarget.multiplyScalar(1 / R.keys.length);
+    const k = 1 - Math.exp(-dt * 7);
+    origin.lerp(originTarget, k);
+  }
+}
+
+const camOffset = new THREE.Vector3();
+const camLook   = new THREE.Vector3();
+function updateCamera(){
+  const back = S.mode === 'ride' ? 11.0 : 16.0;
+  const up   = S.mode === 'ride' ? 4.8  : 7.0;
+  camOffset.copy(V_DOWN).multiplyScalar(-back)
+           .addScaledVector(V_UP, up);
+  camera.position.copy(camOffset);
+  camera.up.set(0,1,0);
+  camLook.copy(V_DOWN).multiplyScalar(S.mode === 'ride' ? 12 : 2.5)
+         .addScaledVector(V_UP, 1.3);
+  camera.lookAt(camLook);
+}
+
+/* ============================================================
+   リグ更新
+============================================================ */
+const _pa = new THREE.Vector3(), _pb = new THREE.Vector3();
+const _dir = new THREE.Vector3();
+const Y_AXIS = new THREE.Vector3(0,1,0);
+
+function updateRig(rig, getWorld){
+  for (const k in BODY){
+    getWorld(k, _pa);
+    rig.joints[k].position.copy(_pa).sub(origin);
+  }
+  getWorld('head', _pa);
+  rig.visor.position.copy(_pa).sub(origin)
+    .addScaledVector(V_DOWN, 0.16)
+    .addScaledVector(V_UP, 0.05);
+
+  for (let i = 0; i < BONES.length; i++){
+    const b = BONES[i];
+    getWorld(b[0], _pa);
+    getWorld(b[1], _pb);
+    const mesh = rig.bones[i];
+    _dir.subVectors(_pb, _pa);
+    const len = _dir.length();
+    if (len < 1e-4){ mesh.visible = false; continue; }
+    mesh.visible = true;
+    mesh.position.copy(_pa).sub(origin);
+    mesh.quaternion.setFromUnitVectors(Y_AXIS, _dir.normalize());
+    const r = mesh.userData.radius;
+    mesh.scale.set(r, len, r);
+  }
+}
+
+function updateAllRiders(){
+  updateRig(playerRig, playerGetWorld);
+  for (const b of bots){
+    if (b.state === 'ride'){
+      updateRig(b.rig, (name, out) => botPartWorld(b, name, out));
+    } else if (b.ragdoll){
+      updateRig(b.rig, (name, out) => out.copy(b.ragdoll.parts[name].pos));
+    }
+  }
+}
+
+/* ============================================================
+   ワールド更新
+============================================================ */
+const _gp = new THREE.Vector3();
+
+function updateWorldObjects(){
+  const centerS = S.s + 950;
+
+  slopeToWorld(centerS, 0, 0, _gp);
+  ground.position.copy(_gp).sub(origin);
+
+  slopeToWorld(centerS, WALL_H/2, -WALL_LAT, _gp);
+  wallL.position.copy(_gp).sub(origin);
+  slopeToWorld(centerS, WALL_H/2,  WALL_LAT, _gp);
+  wallR.position.copy(_gp).sub(origin);
+
+  for (const o of S.obstacles){
+    o.mesh.position.copy(o.pos).sub(origin);
+  }
+
+  groundUni.uOffsetS.value = (S.s + 950) % 1000;
+  wallUni.uOffsetS.value   = (S.s + 950);
+}
+
+/* ============================================================
+   ゴール看板
+============================================================ */
+let goalMesh = null;
+function ensureGoal(){
+  if (goalMesh) return;
+  const g = new THREE.Group();
+  const c = document.createElement('canvas');
+  c.width = 256; c.height = 64;
+  const x = c.getContext('2d');
+  const n = 16, sz = 16;
+  for (let i=0;i<n;i++){
+    for (let j=0;j<4;j++){
+      x.fillStyle = ((i+j)%2===0) ? '#ffffff' : '#111111';
+      x.fillRect(i*sz, j*sz, sz, sz);
+    }
+  }
+  const tex = new THREE.CanvasTexture(c);
+  const board = new THREE.Mesh(
+    new THREE.BoxGeometry(10, 2.5, 0.3),
+    new THREE.MeshLambertMaterial({ map: tex })
+  );
+  board.position.y = 5.0; g.add(board);
+  for (const lx of [-4.6, 4.6]){
+    const pole = new THREE.Mesh(new THREE.BoxGeometry(0.35, 5.2, 0.35), M.metal);
+    pole.position.set(lx, 2.6, 0); g.add(pole);
+  }
+  const arch = new THREE.Mesh(
+    new THREE.TorusGeometry(5.2, 0.22, 8, 24),
+    new THREE.MeshLambertMaterial({ color:0x111111, transparent:true })
+  );
+  arch.position.y = 5.2; g.add(arch);
+  goalMesh = g;
+  scene.add(g);
+  goalMesh.userData.base = slopeToWorld(GOAL, 0, 0, new THREE.Vector3());
+  goalMesh.quaternion.copy(slopeQuat);
+}
+function updateGoal(){
+  ensureGoal();
+  const dist = GOAL - S.s;
+  if (dist > 2500 || dist < -200){ goalMesh.visible = false; return; }
+  goalMesh.visible = true;
+  goalMesh.position.copy(goalMesh.userData.base).sub(origin);
+}
+
+/* ============================================================
+   HUD
+============================================================ */
+const elD1  = document.getElementById('d1');
+const elD2  = document.getElementById('d2');
+const elSp  = document.getElementById('sp');
+const elBar = document.getElementById('barfill');
+const elPct = document.getElementById('pct');
+
+function updateHUD(){
+  const d = Math.max(0, S.dist);
+  elD1.textContent = Math.floor(d).toLocaleString();
+  elD2.textContent = Math.max(0, Math.floor(GOAL - d)).toLocaleString();
+
+  let kmh = 0;
+  if (S.mode === 'ride'){
+    kmh = Math.hypot(S.vs, S.vlat) * 3.6;
+  } else if (S.ragdoll){
+    let vx=0, vy=0, vz=0;
+    for (const k of S.ragdoll.keys){
+      const p = S.ragdoll.parts[k];
+      vx += p.pos.x - p.prev.x;
+      vy += p.pos.y - p.prev.y;
+      vz += p.pos.z - p.prev.z;
+    }
+    const n = S.ragdoll.keys.length;
+    kmh = Math.hypot(vx/n, vy/n, vz/n) / DT * 3.6;
+  }
+  elSp.textContent = Math.floor(kmh).toLocaleString();
+
+  const p = Math.min(100, d / GOAL * 100);
+  elBar.style.width = p.toFixed(4) + '%';
+  elPct.textContent = p.toFixed(6) + ' %';
+}
+
+function applyShake(){
+  if (S.shake <= 0) return;
+  const amp = S.shake * 0.55;
+  camera.position.x += (Math.random()-0.5) * amp;
+  camera.position.y += (Math.random()-0.5) * amp;
+  camera.position.z += (Math.random()-0.5) * amp;
+}
+
+/* ============================================================
+   メインループ
+============================================================ */
+let lastT = performance.now();
+let acc = 0;
+function animate(now){
+  requestAnimationFrame(animate);
+  let dt = (now - lastT) / 1000;
+  lastT = now;
+  if (dt > 0.12) dt = 0.12;
+
+  acc += dt;
+  let steps = 0;
+  while (acc >= DT && steps < 16){
+    physics(DT);
+    acc -= DT;
+    steps++;
+  }
+  if (steps >= 16) acc = 0;
+
+  updateOrigin(dt);
+  updateCamera();
+  applyShake();
+  updateAllRiders();
+  updateWorldObjects();
+  updateGoal();
+  renderer.render(scene, camera);
+  updateHUD();
+}
+
+reset();
+document.getElementById('loading').remove();
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>
