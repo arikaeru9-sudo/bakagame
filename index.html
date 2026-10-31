@@ -210,7 +210,7 @@ ground.frustumCulled = false;
 scene.add(ground);
 
 /* ============================================================
-   壁（★ 白一色）
+   壁（薄緑色一色）
 ============================================================ */
 const wallUni = {
   uLen:{value:GROUND_L}, uH:{value:WALL_H},
@@ -244,8 +244,8 @@ const wallMat = new THREE.ShaderMaterial({
     varying vec2 vUv;
     varying float vDist;
     void main(){
-      /* ★ 赤白ストライプを廃止し、白一色に */
-      vec3 col = vec3(0.97, 0.97, 0.975);
+      // 薄緑色一色
+      vec3 col = vec3(0.72, 0.88, 0.68);
       float fogF = smoothstep(uFogNear, uFogFar, vDist);
       col = mix(col, uFogColor, fogF);
       gl_FragColor = vec4(col, 1.0);
