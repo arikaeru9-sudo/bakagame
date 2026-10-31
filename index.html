@@ -210,7 +210,7 @@ ground.frustumCulled = false;
 scene.add(ground);
 
 /* ============================================================
-   壁
+   壁（★ 白一色）
 ============================================================ */
 const wallUni = {
   uLen:{value:GROUND_L}, uH:{value:WALL_H},
@@ -244,21 +244,8 @@ const wallMat = new THREE.ShaderMaterial({
     varying vec2 vUv;
     varying float vDist;
     void main(){
-      float s = vUv.x * uLen + uOffsetS;
-      float h = vUv.y * uH;
-      float diag = fract((s + h * 5.0) / 10.0);
-      float stripe = step(0.5, diag);
-      vec3 red   = vec3(0.88, 0.16, 0.16);
-      vec3 white = vec3(0.96, 0.94, 0.88);
-      vec3 col   = mix(red, white, stripe);
-      float vline = step(fract(s / 30.0), 0.025);
-      col = mix(col, vec3(0.18, 0.10, 0.08), vline * 0.9);
-      float botDark = smoothstep(2.5, 0.0, h);
-      col = mix(col, vec3(0.08, 0.04, 0.04), botDark * 0.7);
-      float topGlow = smoothstep(uH - 2.5, uH - 0.3, h);
-      col = mix(col, vec3(1.0, 0.85, 0.18), topGlow * 0.95);
-      float topCap = step(uH - 0.35, h);
-      col = mix(col, vec3(0.12, 0.08, 0.04), topCap);
+      /* ★ 赤白ストライプを廃止し、白一色に */
+      vec3 col = vec3(0.97, 0.97, 0.975);
       float fogF = smoothstep(uFogNear, uFogFar, vDist);
       col = mix(col, uFogColor, fogF);
       gl_FragColor = vec4(col, 1.0);
